@@ -1096,7 +1096,7 @@ app.get("/health", (req, res) => {
 
 app.get("/api/status", (req, res) => {
   res.json({
-    status: "ok", name: "Omingenous API", version: "2.1.0",
+    status: "ok", name: "Omingenous API", version: "3.0.0",
     timestamp: new Date().toISOString(), previewCount: previews.size,
     environment: process.env.NODE_ENV || "production",
   });
