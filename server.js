@@ -109,14 +109,15 @@ app.post("/api/deploy", async (req, res) => {
       return res.status(400).json({ success: false, error: "files is required" });
     }
 
+    // exp.host Snack API v2 — the correct live endpoint (snack.expo.dev/api/snack/save is 404)
     const payload = {
-      files,
+      manifest: {
+        sdkVersion: "51.0.0",
+        name: "Omingenous App",
+        description: "Built with Omingenous AI",
+      },
+      code: files,
       dependencies: dependencies || {
-        react: "18.2.0",
-        "react-native": "0.74.0",
-        expo: "~51.0.0",
-        "@react-navigation/native": "^6.1.17",
-        "@react-navigation/stack": "^6.3.29",
         "react-native-screens": "~3.31.1",
         "react-native-safe-area-context": "4.10.5",
         "@react-native-async-storage/async-storage": "1.23.1",
@@ -125,9 +126,12 @@ app.post("/api/deploy", async (req, res) => {
       },
     };
 
-    const snackRes = await fetch("https://snack.expo.dev/api/snack/save", {
+    const snackRes = await fetch("https://exp.host/--/api/v2/snack/save", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Expo-Snack-API-Version": "3.0.0",
+      },
       body: JSON.stringify(payload),
     });
 
