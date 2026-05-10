@@ -72,25 +72,31 @@ function generateHtmlPreview(fm) {
   return html;
 }
 
-// ─── React web preview (React + Tailwind, no RN layer) ───────────────────────
+// ─── React web preview — proper virtual module system (no file concatenation) ─
 function generateReactWebPreview(fm) {
   const names = Object.keys(fm);
-  const mainKey = names.find(n => n === "App.js" || n === "App.jsx" || n === "app.js" || n === "index.js") || names.find(n => n.endsWith(".js") || n.endsWith(".jsx"));
-  const mainCode = mainKey ? (fm[mainKey].contents || fm[mainKey].content || "") : "";
 
-  // Concatenate helper JS files first (App.js last) so local names are in scope
-  const helpers = Object.entries(fm)
-    .filter(([n]) => (n.endsWith(".js") || n.endsWith(".jsx")) && n !== mainKey)
-    .map(([, f]) => f.contents || f.content || "")
-    .join("\n\n");
-  const combined = helpers ? helpers + "\n\n" + mainCode : mainCode;
-  const transformed = transformCodeForWeb(combined);
-  const b64 = Buffer.from(transformed, "utf8").toString("base64");
+  // Virtual file system: filename → raw source string
+  const vfs = {};
+  for (const [name, file] of Object.entries(fm)) {
+    if (!name.endsWith(".css")) vfs[name] = file.contents || file.content || "";
+  }
 
+  // Determine the main entry file
+  const mainKey =
+    names.find(n => n === "App.js" || n === "App.jsx") ||
+    names.find(n => n === "app.js" || n === "index.js" || n === "index.jsx" || n === "main.js") ||
+    names.find(n => (n.endsWith(".js") || n.endsWith(".jsx")) && !n.includes("/")) ||
+    names.find(n => n.endsWith(".js") || n.endsWith(".jsx")) || "";
+
+  // Collect CSS to inject into <style>
   const extraCss = Object.entries(fm)
     .filter(([n]) => n.endsWith(".css"))
     .map(([, f]) => f.contents || f.content || "")
     .join("\n");
+
+  const vfsJson = JSON.stringify(vfs);
+  const mainKeyJson = JSON.stringify(mainKey);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -98,65 +104,175 @@ function generateReactWebPreview(fm) {
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
   <title>App Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    html,body,#root{height:100%}
-    #loading{position:fixed;inset:0;background:#fff;display:flex;align-items:center;
-      justify-content:center;z-index:9999;font-family:system-ui,sans-serif}
-    #loading p{color:#6366f1;font-size:15px;animation:ld-p 1.2s ease-in-out infinite}
-    @keyframes ld-p{0%,100%{opacity:.3}50%{opacity:1}}
-    #err{display:none;padding:32px;background:#fff7f7;color:#ef4444;font-family:monospace;
-      font-size:13px;white-space:pre-wrap;overflow:auto;min-height:100vh;line-height:1.6}
-    #err h2{color:#dc2626;margin-bottom:12px}
+    html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;background:#050508;color:#f8fafc}
+    #root{min-height:100vh}
+    #ld{position:fixed;inset:0;background:#050508;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:16px;z-index:9999}
+    .ld-ring{width:36px;height:36px;border-radius:50%;border:3px solid rgba(108,92,231,0.2);
+      border-top-color:#6C5CE7;animation:spin 0.8s linear infinite}
+    .ld-txt{color:#475569;font-size:13px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    #err{display:none;padding:32px;background:#0a0a14;color:#f8fafc;font-family:monospace;
+      font-size:13px;white-space:pre-wrap;overflow:auto;min-height:100vh;line-height:1.6;
+      border-left:4px solid #ef4444}
+    #err h2{color:#ef4444;font-family:'Inter',sans-serif;font-size:15px;margin-bottom:12px;letter-spacing:-.01em}
+    #err pre{color:#94a3b8;font-size:11px;margin-top:8px;line-height:1.8}
     ${extraCss}
   </style>
 </head>
 <body>
-  <div id="loading"><p>Loading preview...</p></div>
+  <div id="ld"><div class="ld-ring"></div><span class="ld-txt">Building preview…</span></div>
   <div id="root"></div>
   <div id="err"></div>
   <script>
-    window.useState        = React.useState;
-    window.useEffect       = React.useEffect;
-    window.useRef          = React.useRef;
-    window.useCallback     = React.useCallback;
-    window.useMemo         = React.useMemo;
-    window.useContext      = React.useContext;
-    window.useReducer      = React.useReducer;
-    window.useLayoutEffect = React.useLayoutEffect;
-    window.createContext   = React.createContext;
-    window.Fragment        = React.Fragment;
-    window.memo            = React.memo;
-    window.forwardRef      = React.forwardRef;
-    (function () {
-      var loading = document.getElementById('loading');
-      var errDiv  = document.getElementById('err');
-      function showError(title, detail) {
-        loading.style.display = 'none';
-        errDiv.style.display  = 'block';
-        errDiv.innerHTML = '<h2>Preview Error: ' + esc(title) + '<\\/h2><pre>' + esc(detail || '') + '<\\/pre>';
+  (function() {
+    'use strict';
+    var ld     = document.getElementById('ld');
+    var errDiv = document.getElementById('err');
+
+    function showError(title, detail) {
+      ld.style.display      = 'none';
+      errDiv.style.display  = 'block';
+      errDiv.innerHTML = '<h2>Preview Error: ' + esc(title) + '<\\/h2><pre>' + esc(detail || '') + '<\\/pre>';
+    }
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // ── Virtual File System ────────────────────────────────────────────────────
+    var __VFS     = ${vfsJson};
+    var __mainKey = ${mainKeyJson};
+
+    // ── Module cache & compiled factories ─────────────────────────────────────
+    var __cache   = {};   // path → resolved exports object (or in-progress sentinel)
+    var __factory = {};   // path → function(module, exports, require)
+
+    // ── Path resolver: turn a relative id into a VFS key ─────────────────────
+    function resolvePath(fromFile, id) {
+      if (!id.startsWith('.')) return id;                // external — leave as-is
+      var fromDir = fromFile.split('/').slice(0, -1);
+      id.split('/').forEach(function(seg) {
+        if (seg === '..') fromDir.pop();
+        else if (seg !== '.') fromDir.push(seg);
+      });
+      var base = fromDir.join('/');
+      // Try exact match, then common extensions, then /index files
+      var tries = [base, base+'.js', base+'.jsx', base+'/index.js', base+'/index.jsx'];
+      for (var t = 0; t < tries.length; t++) {
+        if (__VFS[tries[t]] !== undefined) return tries[t];
       }
-      function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      return base + '.js';   // best-effort fallback
+    }
+
+    // ── External stubs — returned when code imports 'react', 'react-dom', etc. ─
+    var __externals = {
+      'react':            Object.assign({ __esModule: true, default: React }, React),
+      'react-dom':        Object.assign({ __esModule: true, default: ReactDOM }, ReactDOM),
+      'react-dom/client': { __esModule: true, default: { createRoot: ReactDOM.createRoot }, createRoot: ReactDOM.createRoot },
+      'react/jsx-runtime':{ __esModule: true, jsx: React.createElement, jsxs: React.createElement, Fragment: React.Fragment },
+      'react/jsx-dev-runtime': { __esModule: true, jsxDEV: React.createElement, Fragment: React.Fragment }
+    };
+
+    // ── require() — returns module exports, resolving relative paths ──────────
+    function makeRequire(fromFile) {
+      return function require(id) {
+        // ── External package ─────────────────────────────────────────────────
+        if (!id.startsWith('.')) {
+          if (__externals[id]) return __externals[id];
+          // Unknown external — return a permissive empty stub
+          console.warn('[preview] unresolved external:', id);
+          var stub = new Proxy({}, { get: function(t,k){ return k==='__esModule'?true:function(){}; } });
+          return stub;
+        }
+
+        var resolved = resolvePath(fromFile, id);
+
+        // ── Cache hit ────────────────────────────────────────────────────────
+        if (__cache[resolved] !== undefined) return __cache[resolved];
+
+        // ── No factory = file missing ────────────────────────────────────────
+        if (!__factory[resolved]) {
+          throw new Error('Module not found: ' + id + '  (resolved → ' + resolved + ')\\n\\nFiles available: ' + Object.keys(__VFS).join(', '));
+        }
+
+        // ── Execute factory (circular-safe: set cache before running) ────────
+        var mod = { exports: {} };
+        __cache[resolved] = mod.exports;          // sentinel for circular deps
+        __factory[resolved](mod, mod.exports, makeRequire(resolved));
+        __cache[resolved] = mod.exports;          // replace with final value
+        return mod.exports;
+      };
+    }
+
+    // ── Compile every JS/JSX file with Babel (ESM → CJS transform) ───────────
+    var compileErrors = [];
+    Object.keys(__VFS).forEach(function(name) {
+      if (!/\\.(js|jsx|ts|tsx)$/.test(name)) return;
       try {
-        var _b64 = "${b64}";
-        var _bin = atob(_b64), _arr = new Uint8Array(_bin.length);
-        for (var i = 0; i < _bin.length; i++) _arr[i] = _bin.charCodeAt(i);
-        var _code = new TextDecoder('utf-8').decode(_arr);
-        var _compiled = Babel.transform(_code, { presets: ['react'], filename: 'App.jsx', retainLines: true }).code;
-        eval(_compiled);
-        var _App = typeof App !== 'undefined' ? App : typeof window.__AppDefault !== 'undefined' ? window.__AppDefault : null;
-        if (!_App) throw new Error('No default App export found. Make sure your code has: export default function App() { ... }');
-        loading.style.display = 'none';
-        ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(_App));
-      } catch (e) {
-        console.error('[preview]', e);
-        showError(e.message, e.stack || '');
+        var src = __VFS[name];
+        var out = Babel.transform(src, {
+          presets: ['react'],
+          plugins: ['transform-modules-commonjs'],
+          filename: name,
+          retainLines: true,
+          sourceType: 'module'
+        }).code;
+        // Wrap in an isolated factory — 'new Function' runs in global scope so
+        // window.React etc. are still accessible, but each module gets its own
+        // local 'module', 'exports', 'require' — NO cross-file variable collisions.
+        __factory[name] = new Function('module', 'exports', 'require', out);
+      } catch(e) {
+        compileErrors.push({ name: name, msg: e.message });
+        console.warn('[preview] compile error in', name + ':', e.message);
       }
-    })();
+    });
+
+    // Surface compile errors only if the main file itself failed
+    if (!__factory[__mainKey]) {
+      var mainErr = compileErrors.find(function(e){ return e.name === __mainKey; });
+      showError(
+        mainErr ? mainErr.name + ': ' + mainErr.msg : 'Main file missing: ' + __mainKey,
+        compileErrors.map(function(e){ return e.name + ': ' + e.msg; }).join('\\n')
+      );
+      return;
+    }
+
+    // ── Execute the main module and mount the App ────────────────────────────
+    try {
+      var entryRequire = makeRequire('__entry__');
+      // Normalise the key so it looks like a relative import
+      var relKey = __mainKey.startsWith('./') ? __mainKey : './' + __mainKey;
+      var mainExports = entryRequire(relKey);
+
+      // Locate the App component: default export, or first PascalCase export
+      var App = mainExports && (mainExports['default'] || mainExports);
+      if (typeof App !== 'function') {
+        for (var k in mainExports) {
+          if (typeof mainExports[k] === 'function' && /^[A-Z]/.test(k)) { App = mainExports[k]; break; }
+        }
+      }
+      if (typeof App !== 'function') {
+        throw new Error(
+          'No App component found in ' + __mainKey + '.\\n\\n' +
+          'Make sure your file contains:\\n  export default function App() { ... }'
+        );
+      }
+
+      ld.style.display = 'none';
+      ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+    } catch(e) {
+      console.error('[preview]', e);
+      showError(e.message, e.stack || '');
+    }
+  })();
   <\/script>
 </body>
 </html>`;
@@ -174,7 +290,7 @@ function generateSmartPreview(fm) {
   return generatePreviewHtml(code);
 }
 
-// ─── Code transformer ────────────────────────────────────────────────────────
+// ─── Code transformer (kept for RN compat layer only) ────────────────────────
 function transformCodeForWeb(code) {
   if (!code) return "";
   return code
