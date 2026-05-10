@@ -1,17 +1,20 @@
 import express from "express";
-import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
   res.setHeader("X-Powered-By", "Omingenous API");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
@@ -38,7 +41,7 @@ app.get("/", (req, res) => {
       border: 1px solid #333;
       border-radius: 12px;
       padding: 48px;
-      max-width: 480px;
+      max-width: 520px;
       width: 100%;
       text-align: center;
     }
@@ -71,12 +74,13 @@ app.get("/", (req, res) => {
 <body>
   <div class="card">
     <h1>Omingenous API</h1>
-    <p>Node.js + Express backend</p>
+    <p>Node.js + Express backend · Render</p>
     <span class="badge">● Online</span>
     <div>
       <div class="endpoint"><span class="method">GET</span><span class="path">/</span></div>
       <div class="endpoint"><span class="method">GET</span><span class="path">/health</span></div>
       <div class="endpoint"><span class="method">GET</span><span class="path">/api/status</span></div>
+      <div class="endpoint"><span class="method">POST</span><span class="path">/api/deploy</span></div>
     </div>
   </div>
 </body>
@@ -91,10 +95,59 @@ app.get("/api/status", (req, res) => {
   res.json({
     status: "ok",
     name: "Omingenous API",
-    version: "1.0.0",
+    version: "1.1.0",
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || "production",
   });
+});
+
+app.post("/api/deploy", async (req, res) => {
+  try {
+    const { files, dependencies } = req.body;
+
+    if (!files || typeof files !== "object") {
+      return res.status(400).json({ success: false, error: "files is required" });
+    }
+
+    const payload = {
+      files,
+      dependencies: dependencies || {
+        react: "18.2.0",
+        "react-native": "0.74.0",
+        expo: "~51.0.0",
+        "@react-navigation/native": "^6.1.17",
+        "@react-navigation/stack": "^6.3.29",
+        "react-native-screens": "~3.31.1",
+        "react-native-safe-area-context": "4.10.5",
+        "@react-native-async-storage/async-storage": "1.23.1",
+        "expo-image-picker": "~15.0.0",
+        "expo-document-picker": "~12.0.0",
+      },
+    };
+
+    const snackRes = await fetch("https://snack.expo.dev/api/snack/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await snackRes.json();
+
+    if (data && data.id) {
+      const url = `https://snack.expo.dev/${data.id}`;
+      console.log(`Deployed: ${url}`);
+      return res.json({ success: true, url, id: data.id });
+    }
+
+    return res.status(502).json({
+      success: false,
+      error: "Snack save failed",
+      detail: data,
+    });
+  } catch (err) {
+    console.error("Deploy error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.use((req, res) => {
