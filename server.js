@@ -22,6 +22,158 @@ app.use((req, res, next) => {
   next();
 });
 
+// ─── Project type detection ──────────────────────────────────────────────────
+function detectProjectType(fm) {
+  const names = Object.keys(fm);
+  // Pure HTML project
+  if (names.some(n => n.toLowerCase() === "index.html")) return "html";
+  // Find the main JS entry
+  const mainKey = names.find(n => n === "App.js" || n === "App.jsx" || n === "app.js" || n === "index.js" || n === "main.js");
+  const code = mainKey ? (fm[mainKey].contents || fm[mainKey].content || "") : (Object.values(fm)[0] ? (Object.values(fm)[0].contents || Object.values(fm)[0].content || "") : "");
+  if (/from\s+['"]react-native['"]/i.test(code) || /require\(['"]react-native['"]\)/.test(code)) return "react-native";
+  return "react-web";
+}
+
+// ─── Regex helper ─────────────────────────────────────────────────────────────
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+// ─── HTML project preview ─────────────────────────────────────────────────────
+function generateHtmlPreview(fm) {
+  const htmlKey = Object.keys(fm).find(n => n.toLowerCase() === "index.html");
+  let html = htmlKey ? (fm[htmlKey].contents || fm[htmlKey].content || "") : "";
+
+  // Collect extra CSS and JS from sibling files
+  const cssFiles = Object.entries(fm).filter(([n]) => n.toLowerCase().endsWith(".css"));
+  const jsFiles  = Object.entries(fm).filter(([n]) => n.toLowerCase().endsWith(".js") || n.toLowerCase().endsWith(".jsx"));
+
+  if (!html) {
+    const css = cssFiles.map(([, f]) => f.contents || f.content || "").join("\n");
+    const js  = jsFiles .map(([, f]) => f.contents || f.content || "").join("\n;\n");
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif}\n${css}</style></head><body><script>\n${js}\n</script></body></html>`;
+  }
+
+  // Replace <link href="name.css"> with inline <style>
+  cssFiles.forEach(([name, file]) => {
+    const css = file.contents || file.content || "";
+    html = html.replace(new RegExp(`<link[^>]+href=["'][./]*${escapeRegExp(name)}["'][^>]*/?>`, "gi"), `<style>${css}</style>`);
+  });
+  // Replace <script src="name.js"></script> with inline <script>
+  jsFiles.forEach(([name, file]) => {
+    const js = file.contents || file.content || "";
+    html = html.replace(new RegExp(`<script[^>]+src=["'][./]*${escapeRegExp(name)}["'][^>]*></script>`, "gi"), `<script>${js}</script>`);
+  });
+  // Inject any CSS file not already inlined
+  const extraCss = cssFiles.filter(([n]) => html.includes(n) === false).map(([, f]) => f.contents || f.content || "").join("\n");
+  if (extraCss) html = html.replace("</head>", `<style>${extraCss}</style>\n</head>`);
+  // Inject any JS file not already inlined
+  const extraJs = jsFiles.filter(([n]) => html.includes(n) === false).map(([, f]) => f.contents || f.content || "").join("\n;\n");
+  if (extraJs) html = html.replace("</body>", `<script>${extraJs}</script>\n</body>`);
+
+  return html;
+}
+
+// ─── React web preview (React + Tailwind, no RN layer) ───────────────────────
+function generateReactWebPreview(fm) {
+  const names = Object.keys(fm);
+  const mainKey = names.find(n => n === "App.js" || n === "App.jsx" || n === "app.js" || n === "index.js") || names.find(n => n.endsWith(".js") || n.endsWith(".jsx"));
+  const mainCode = mainKey ? (fm[mainKey].contents || fm[mainKey].content || "") : "";
+
+  // Concatenate helper JS files first (App.js last) so local names are in scope
+  const helpers = Object.entries(fm)
+    .filter(([n]) => (n.endsWith(".js") || n.endsWith(".jsx")) && n !== mainKey)
+    .map(([, f]) => f.contents || f.content || "")
+    .join("\n\n");
+  const combined = helpers ? helpers + "\n\n" + mainCode : mainCode;
+  const transformed = transformCodeForWeb(combined);
+  const b64 = Buffer.from(transformed, "utf8").toString("base64");
+
+  const extraCss = Object.entries(fm)
+    .filter(([n]) => n.endsWith(".css"))
+    .map(([, f]) => f.contents || f.content || "")
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <title>App Preview</title>
+  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body,#root{height:100%}
+    #loading{position:fixed;inset:0;background:#fff;display:flex;align-items:center;
+      justify-content:center;z-index:9999;font-family:system-ui,sans-serif}
+    #loading p{color:#6366f1;font-size:15px;animation:ld-p 1.2s ease-in-out infinite}
+    @keyframes ld-p{0%,100%{opacity:.3}50%{opacity:1}}
+    #err{display:none;padding:32px;background:#fff7f7;color:#ef4444;font-family:monospace;
+      font-size:13px;white-space:pre-wrap;overflow:auto;min-height:100vh;line-height:1.6}
+    #err h2{color:#dc2626;margin-bottom:12px}
+    ${extraCss}
+  </style>
+</head>
+<body>
+  <div id="loading"><p>Loading preview...</p></div>
+  <div id="root"></div>
+  <div id="err"></div>
+  <script>
+    window.useState        = React.useState;
+    window.useEffect       = React.useEffect;
+    window.useRef          = React.useRef;
+    window.useCallback     = React.useCallback;
+    window.useMemo         = React.useMemo;
+    window.useContext      = React.useContext;
+    window.useReducer      = React.useReducer;
+    window.useLayoutEffect = React.useLayoutEffect;
+    window.createContext   = React.createContext;
+    window.Fragment        = React.Fragment;
+    window.memo            = React.memo;
+    window.forwardRef      = React.forwardRef;
+    (function () {
+      var loading = document.getElementById('loading');
+      var errDiv  = document.getElementById('err');
+      function showError(title, detail) {
+        loading.style.display = 'none';
+        errDiv.style.display  = 'block';
+        errDiv.innerHTML = '<h2>Preview Error: ' + esc(title) + '<\\/h2><pre>' + esc(detail || '') + '<\\/pre>';
+      }
+      function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      try {
+        var _b64 = "${b64}";
+        var _bin = atob(_b64), _arr = new Uint8Array(_bin.length);
+        for (var i = 0; i < _bin.length; i++) _arr[i] = _bin.charCodeAt(i);
+        var _code = new TextDecoder('utf-8').decode(_arr);
+        var _compiled = Babel.transform(_code, { presets: ['react'], filename: 'App.jsx', retainLines: true }).code;
+        eval(_compiled);
+        var _App = typeof App !== 'undefined' ? App : typeof window.__AppDefault !== 'undefined' ? window.__AppDefault : null;
+        if (!_App) throw new Error('No default App export found. Make sure your code has: export default function App() { ... }');
+        loading.style.display = 'none';
+        ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(_App));
+      } catch (e) {
+        console.error('[preview]', e);
+        showError(e.message, e.stack || '');
+      }
+    })();
+  <\/script>
+</body>
+</html>`;
+}
+
+// ─── Smart dispatcher ─────────────────────────────────────────────────────────
+function generateSmartPreview(fm) {
+  const type = detectProjectType(fm);
+  console.log(`[preview] project type: ${type} | files: ${Object.keys(fm).join(", ")}`);
+  if (type === "html")         return generateHtmlPreview(fm);
+  if (type === "react-web")    return generateReactWebPreview(fm);
+  // react-native: extract main App.js code and use RN compat layer
+  const mainKey = Object.keys(fm).find(n => n === "App.js" || n === "App.jsx" || n === "app.js" || n === "index.js") || Object.keys(fm)[0];
+  const code = mainKey ? (fm[mainKey].contents || fm[mainKey].content || "") : "";
+  return generatePreviewHtml(code);
+}
+
 // ─── Code transformer ────────────────────────────────────────────────────────
 function transformCodeForWeb(code) {
   if (!code) return "";
@@ -978,17 +1130,13 @@ app.get("/preview/:id", (req, res) => {
 <style>body{background:#0f0f0f;color:#ff6b6b;font-family:monospace;padding:48px;text-align:center}</style>
 </head><body><h2>Preview Expired</h2><p style="color:#888;margin-top:12px">Rebuild and tap Preview again for a fresh link.</p></body></html>`);
   }
-  const fm  = preview.files;
-  const ent = fm["App.js"] || fm["app.js"] || fm["index.js"] ||
-              Object.values(fm).find(f => f && (f.contents || f.content));
-  const code = (ent && (ent.contents || ent.content)) || "";
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
-  res.send(generatePreviewHtml(code));
+  res.send(generateSmartPreview(preview.files));
 });
 
 app.use((req, res) => res.status(404).json({ error: "Not found", path: req.path }));
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: "Internal server error" }); });
 
-app.listen(PORT, () => console.log(`Server v2.1.0 on port ${PORT} — ${BASE_URL}`));
+app.listen(PORT, () => console.log(`Server v3.0.0 on port ${PORT} — ${BASE_URL}`));
 export default app;
